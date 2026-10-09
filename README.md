@@ -1,8 +1,8 @@
 # LAB. for Home Assistant
 
-A Home Assistant add-on (shown as an "app" in recent Home Assistant) that lists every **LAB.** device on the network and opens its setup page from the sidebar, like the WLED app does for WLED. Part of the LAB. range: [LAB. Zones](https://github.com/NightStinks/lab-zones), [LAB. Presence](https://github.com/NightStinks/lab-presence).
+A Home Assistant add-on (shown as an "app" in recent Home Assistant) that lists every **LAB.** device on the network and opens its setup page from the sidebar, like the WLED app does for WLED. Part of the LAB. range of sensors (LAB. Zones, LAB. Presence).
 
-Status: 0.1.0, internal testing. Private.
+Status: 0.1.0, testing. This repository is public so Home Assistant can install the add-on from its URL; the device firmware lives in separate private repositories.
 
 ## What it does
 
@@ -29,6 +29,6 @@ LAB_DEV=1 .venv/bin/python lab/app/main.py
 
 Then open `http://localhost:8749/`. `LAB_DEV=1` lets any client connect.
 
-## Install for testing (repository is private)
+## Install
 
-Copy the `lab` folder into Home Assistant's `/addons` folder (for example from the Terminal add-on), then Settings, Add-ons, Add-on store, ⋮, Check for updates. It appears under **Local add-ons** as **LAB.**. Once the repository is public, it can instead be added as a repository URL.
+In Home Assistant: Settings, Add-ons (Apps), Add-on store, ⋮, Repositories, add `https://github.com/NightStinks/lab-hub`. Then install **LAB.**, start it, and turn on Show in sidebar. Home Assistant builds it on the device, which takes a few minutes the first time.
