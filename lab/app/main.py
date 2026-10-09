@@ -11,6 +11,8 @@
   rename it, and copies it to the device's name in Home Assistant (matched by MAC) through the Supervisor
   API. A name is copied once each time it changes on the sensor, so a later rename in Home Assistant
   is left alone.
+- The list is saved (/data/devices.json), so an unplugged device still shows, as Offline, with Remove. A
+  factory reset sent through the add-on removes the device from the list straight away.
 - Only Home Assistant's Ingress proxy (172.30.32.2) may connect, unless LAB_DEV=1 (local testing).
 """
 import asyncio, gzip, json, os, socket, time
@@ -25,11 +27,33 @@ INGRESS_IP = "172.30.32.2"
 SUPERVISOR_TOKEN = os.environ.get("SUPERVISOR_TOKEN")
 DATA = Path("/data") if Path("/data").is_dir() else Path(__file__).parent
 SYNCED = DATA / "names_synced.json"        # mac -> the sensor name last copied to Home Assistant
+KNOWN = DATA / "devices.json"              # devices seen before, so an unplugged one still shows (as Offline)
+KEEP = ("host", "ip", "name", "product", "version", "mac", "label", "can_rename")
 TYPES = ["_lab._tcp.local.", "_esphomelib._tcp.local."]
 PRODUCTS = {"zones": "LAB. Zones", "presence": "LAB. Presence"}
 HERE = Path(__file__).parent
 
 devices: dict[str, dict] = {}   # key: host name without .local, e.g. lab-zones-a5036c
+
+
+def save_known() -> None:
+    try:
+        KNOWN.write_text(json.dumps({h: {k: d.get(k) for k in KEEP} for h, d in devices.items()}))
+    except Exception as e:
+        print(f"Could not save the device list: {e}")
+
+
+def load_known() -> None:
+    try:
+        for h, d in json.loads(KNOWN.read_text()).items():
+            devices[h] = {**d, "online": None, "presence": None, "people": None, "seen": 0}
+    except Exception:
+        pass
+
+
+def forget(host: str) -> None:
+    if devices.pop(host, None) is not None:
+        save_known()
 
 
 def txt(info: AsyncServiceInfo) -> dict:
@@ -61,6 +85,7 @@ async def on_service(zc: AsyncZeroconf, type_: str, name: str) -> None:
         d["version"] = t.get("project_version") or d.get("version")
         d["mac"] = t.get("mac")
     d.setdefault("name", PRODUCTS.get(d.get("product") or "", host))
+    save_known()
 
 
 async def discover(app: web.Application) -> None:
@@ -98,8 +123,11 @@ async def poll(app: web.Application) -> None:
                 # Optional: not every LAB. device has these (older firmware drops the connection instead of a 404).
                 d["people"] = await get_value(s, d, "sensor/People")
                 label = await get_value(s, d, "text/Sensor%20name", missing=None)
+                before = (d.get("label"), d.get("can_rename"))
                 d["can_rename"] = label is not None
                 d["label"] = (label or "").strip()
+                if (d["label"], d["can_rename"]) != before:
+                    save_known()
             await sync_names()
             await asyncio.sleep(10)
 
@@ -159,6 +187,15 @@ async def sync_names(force: str | None = None) -> None:
         print(f"Could not update names in Home Assistant: {e}")
 
 
+async def api_forget(request: web.Request) -> web.Response:
+    host = str((await request.json()).get("host", ""))
+    d = devices.get(host)
+    if d and d.get("online") is not False:          # only once it has been checked and found offline
+        raise web.HTTPConflict(text="Only devices found to be offline can be removed. Try again in a few seconds.")
+    forget(host)
+    return web.json_response({"ok": True})
+
+
 async def api_rename(request: web.Request) -> web.Response:
     data = await request.json()
     host, name = str(data.get("host", "")), str(data.get("name", "")).strip()[:32]
@@ -170,6 +207,7 @@ async def api_rename(request: web.Request) -> web.Response:
         if r.status != 200:
             raise web.HTTPBadGateway(text="The device did not accept the name. It may need a firmware update.")
     d["label"] = name
+    save_known()
     await sync_names(force=host)
     return web.json_response({"ok": True, "label": name, "home_assistant": bool(SUPERVISOR_TOKEN)})
 
@@ -214,6 +252,9 @@ async def proxy(request: web.Request) -> web.StreamResponse:
         raise web.HTTPBadGateway(text="Could not reach the device.")
     async with upstream:
         ctype = upstream.headers.get("Content-Type", "")
+        # A factory reset sent through here: the device is about to leave the network, so drop it from the list.
+        if request.method == "POST" and upstream.status == 200 and tail.replace("%20", " ") == "button/Factory reset/press":
+            forget(host)
         if tail in ("", "index.html") and "text/html" in ctype and not upstream.headers.get("Content-Encoding"):
             html = (await upstream.text()).replace("src=/0.js", "src=0.js").replace('src="/0.js"', 'src="0.js"')
             html = html.replace("<body>", "<body>" + BACK, 1)
@@ -239,6 +280,7 @@ async def proxy(request: web.Request) -> web.StreamResponse:
 
 
 async def start(app: web.Application) -> None:
+    load_known()
     app["http"] = ClientSession(auto_decompress=False)
     await discover(app)
     app["poller"] = asyncio.create_task(poll(app))
@@ -256,6 +298,7 @@ def main() -> None:
     app.router.add_get("/", index)
     app.router.add_get("/api/devices", api_devices)
     app.router.add_post("/api/rename", api_rename)
+    app.router.add_post("/api/forget", api_forget)
     app.router.add_get("/d/{host}", lambda r: web.HTTPFound(f"{r.match_info['host']}/"))
     app.router.add_route("*", "/d/{host}/{tail:.*}", proxy)
     app.on_startup.append(start)

@@ -28,7 +28,7 @@ a.dev:hover,a.dev:focus-visible{border-color:var(--ink);outline:none}
 .name{font-family:var(--fd);font-weight:600;letter-spacing:-.02em;font-size:17px}
 .meta{color:var(--muted);font-size:14px}
 .go{font-family:var(--fd);font-weight:600;border-radius:20px 20px 6px 6px;background:var(--ink);color:var(--on-ink);padding:8px 14px 6px;font-size:14px}
-.dev.off .go{background:transparent;color:var(--muted);border:1px solid var(--line)}
+.dev.off .go{background:transparent;color:var(--ink);border:1px solid var(--line);font:inherit;font-family:var(--fd);font-weight:600;font-size:14px;cursor:pointer}
 .empty{color:var(--muted)}
 .ren{border:0;background:transparent;color:var(--muted);padding:6px;border-radius:8px;cursor:pointer;display:grid;place-items:center}
 .ren:hover{color:var(--ink);background:var(--track)}
@@ -73,15 +73,22 @@ function draw() {
   if (!LIST.length) { box.innerHTML = `<div class="card empty">No LAB. devices found yet. New ones appear here a minute after they join your Wi-Fi.</div>`; return; }
   box.innerHTML = LIST.map((d) => {
     const on = d.online !== false, here = on && d.presence === true;
-    const state = !on ? "Offline" : d.presence === true ? (d.people > 1 ? `${d.people} people` : "Someone here") : d.presence === false ? "Clear" : "Connecting";
+    const state = !on ? "Offline: unplugged, reset or off Wi-Fi" : d.presence === true ? (d.people > 1 ? `${d.people} people` : "Someone here") : d.presence === false ? "Clear" : "Connecting";
     const sub = `${esc(PRODUCT[d.product] || "LAB.")}${d.label ? ` (${esc(d.name || d.host)})` : ""} · ${esc(state)}${d.version ? ` · ${esc(d.version)}` : ""}`;
     const nameHtml = EDITING === d.host
       ? `<div class="row2"><input id="rn" value="${esc(d.label || "")}" maxlength="32" placeholder="For example Bedroom" aria-label="Sensor name"><button class="ren" data-save="${esc(d.host)}" aria-label="Save name">Save</button></div>`
-      : `<div class="row2"><span class="name">${esc(title(d))}</span>${d.can_rename ? `<button class="ren" data-ren="${esc(d.host)}" aria-label="Rename ${esc(title(d))}">${pen}</button>` : ""}</div>`;
+      : `<div class="row2"><span class="name">${esc(title(d))}</span>${d.can_rename && on ? `<button class="ren" data-ren="${esc(d.host)}" aria-label="Rename ${esc(title(d))}">${pen}</button>` : ""}</div>`;
     return `<a class="dev${on ? "" : " off"}${here ? " here" : ""}" href="d/${encodeURIComponent(d.host)}/">
       <div class="arch"><i></i></div><div>${nameHtml}<div class="meta">${sub}</div></div>
-      <span class="go">${on ? "Open" : "Offline"}</span></a>`;
+      ${on ? `<span class="go">Open</span>` : `<button class="go" data-forget="${esc(d.host)}" title="Remove it from this list. If it comes back on your network it reappears.">Remove</button>`}</a>`;
   }).join("");
+  box.querySelectorAll("[data-forget]").forEach((b) => (b.onclick = async (e) => {
+    e.preventDefault();
+    const d = LIST.find((x) => x.host === b.dataset.forget);
+    if (!confirm(`Remove ${title(d)} from this list? If it comes back on your network, it reappears.`)) return;
+    const r = await fetch("api/forget", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ host: b.dataset.forget }) });
+    if (r.ok) { LIST = LIST.filter((x) => x.host !== b.dataset.forget); draw(); toast("Removed."); } else toast(await r.text());
+  }));
   box.querySelectorAll("[data-ren]").forEach((b) => (b.onclick = (e) => { e.preventDefault(); EDITING = b.dataset.ren; draw(); const i = document.getElementById("rn"); i.focus(); i.select(); }));
   const i = document.getElementById("rn");
   if (i) {

@@ -1,5 +1,5 @@
 name: LAB.
-version: "0.2.0"
+version: "0.3.0"
 slug: lab
 description: Find, open and set up your LAB. sensors from Home Assistant.
 url: https://github.com/NightStinks/lab-hub

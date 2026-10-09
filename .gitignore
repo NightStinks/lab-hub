@@ -1,3 +1,5 @@
 .venv/
 __pycache__/
 .DS_Store
+lab/app/devices.json
+lab/app/names_synced.json
