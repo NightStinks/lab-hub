@@ -1,5 +1,5 @@
 name: LAB.
-version: "0.1.0"
+version: "0.2.0"
 slug: lab
 description: Find, open and set up your LAB. sensors from Home Assistant.
 url: https://github.com/NightStinks/lab-hub
@@ -16,3 +16,5 @@ panel_icon: mdi:radar
 panel_title: LAB.
 # mDNS discovery needs the host network (multicast does not cross the add-on network).
 host_network: true
+# Lets the add-on set device names in Home Assistant to the names given to the sensors.
+homeassistant_api: true

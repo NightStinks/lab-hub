@@ -30,6 +30,11 @@ a.dev:hover,a.dev:focus-visible{border-color:var(--ink);outline:none}
 .go{font-family:var(--fd);font-weight:600;border-radius:20px 20px 6px 6px;background:var(--ink);color:var(--on-ink);padding:8px 14px 6px;font-size:14px}
 .dev.off .go{background:transparent;color:var(--muted);border:1px solid var(--line)}
 .empty{color:var(--muted)}
+.ren{border:0;background:transparent;color:var(--muted);padding:6px;border-radius:8px;cursor:pointer;display:grid;place-items:center}
+.ren:hover{color:var(--ink);background:var(--track)}
+.row2{display:flex;align-items:center;gap:6px}
+.dev input{font:inherit;font-family:var(--fd);font-weight:600;font-size:16px;color:var(--ink);background:var(--bg);border:1px solid var(--ink);border-radius:8px;padding:4px 8px;width:100%;max-width:280px}
+.toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:var(--ink);color:var(--on-ink);padding:10px 18px;border-radius:999px;font-size:14px;opacity:0;transition:opacity .2s;pointer-events:none}.toast.show{opacity:1}
 ol{margin:12px 0 0;padding-left:20px;display:grid;gap:8px}
 ol b{font-weight:600}
 .note{color:var(--muted);font-size:14px;margin:14px 0 0}
@@ -54,24 +59,50 @@ ol b{font-weight:600}
     <p class="note">Moving a sensor to another home? Just plug it in there: if it cannot find its old Wi-Fi for a minute, its setup Wi-Fi comes back on its own. To wipe it completely, plug it in and unplug it again within 10 seconds, five times in a row.</p>
   </section>
 </main>
+<div class="toast" id="toast" role="status"></div>
 <script>
 const PRODUCT = { zones: "Zones", presence: "Presence" };
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
-async function load() {
+const pen = `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 20h4L19 9l-4-4L4 16z"/></svg>`;
+let LIST = [], EDITING = null, tt;
+function toast(m) { const t = document.getElementById("toast"); t.textContent = m; t.classList.add("show"); clearTimeout(tt); tt = setTimeout(() => t.classList.remove("show"), 3200); }
+const title = (d) => d.label || d.name || d.host;
+function draw() {
+  const box = document.getElementById("devs");
+  document.getElementById("count").textContent = LIST.length ? `${LIST.length} found` : "Looking on your network";
+  if (!LIST.length) { box.innerHTML = `<div class="card empty">No LAB. devices found yet. New ones appear here a minute after they join your Wi-Fi.</div>`; return; }
+  box.innerHTML = LIST.map((d) => {
+    const on = d.online !== false, here = on && d.presence === true;
+    const state = !on ? "Offline" : d.presence === true ? (d.people > 1 ? `${d.people} people` : "Someone here") : d.presence === false ? "Clear" : "Connecting";
+    const sub = `${esc(PRODUCT[d.product] || "LAB.")}${d.label ? ` (${esc(d.name || d.host)})` : ""} · ${esc(state)}${d.version ? ` · ${esc(d.version)}` : ""}`;
+    const nameHtml = EDITING === d.host
+      ? `<div class="row2"><input id="rn" value="${esc(d.label || "")}" maxlength="32" placeholder="For example Bedroom" aria-label="Sensor name"><button class="ren" data-save="${esc(d.host)}" aria-label="Save name">Save</button></div>`
+      : `<div class="row2"><span class="name">${esc(title(d))}</span>${d.can_rename ? `<button class="ren" data-ren="${esc(d.host)}" aria-label="Rename ${esc(title(d))}">${pen}</button>` : ""}</div>`;
+    return `<a class="dev${on ? "" : " off"}${here ? " here" : ""}" href="d/${encodeURIComponent(d.host)}/">
+      <div class="arch"><i></i></div><div>${nameHtml}<div class="meta">${sub}</div></div>
+      <span class="go">${on ? "Open" : "Offline"}</span></a>`;
+  }).join("");
+  box.querySelectorAll("[data-ren]").forEach((b) => (b.onclick = (e) => { e.preventDefault(); EDITING = b.dataset.ren; draw(); const i = document.getElementById("rn"); i.focus(); i.select(); }));
+  const i = document.getElementById("rn");
+  if (i) {
+    i.onclick = (e) => e.preventDefault();
+    i.onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); save(EDITING, i.value); } if (e.key === "Escape") { EDITING = null; draw(); } };
+    box.querySelector("[data-save]").onclick = (e) => { e.preventDefault(); save(EDITING, i.value); };
+  }
+}
+async function save(host, name) {
   try {
-    const list = await (await fetch("api/devices", { cache: "no-store" })).json();
-    const box = document.getElementById("devs");
-    document.getElementById("count").textContent = list.length ? `${list.length} found` : "Looking on your network";
-    if (!list.length) { box.innerHTML = `<div class="card empty">No LAB. devices found yet. New ones appear here a minute after they join your Wi-Fi.</div>`; return; }
-    box.innerHTML = list.map((d) => {
-      const on = d.online !== false, here = on && d.presence === true;
-      const state = !on ? "Offline" : d.presence === true ? (d.people > 1 ? `${d.people} people` : "Someone here") : d.presence === false ? "Clear" : "Connecting";
-      return `<a class="dev${on ? "" : " off"}${here ? " here" : ""}" href="d/${encodeURIComponent(d.host)}/">
-        <div class="arch"><i></i></div>
-        <div><div class="name">${esc(d.name || d.host)}</div><div class="meta">${esc(PRODUCT[d.product] || "LAB.")} · ${esc(state)}${d.version ? ` · ${esc(d.version)}` : ""}</div></div>
-        <span class="go">${on ? "Open" : "Offline"}</span></a>`;
-    }).join("");
-  } catch (e) {}
+    const r = await fetch("api/rename", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ host, name }) });
+    if (!r.ok) throw new Error(await r.text());
+    const j = await r.json();
+    const d = LIST.find((x) => x.host === host); if (d) d.label = j.label;
+    toast(j.home_assistant ? "Renamed, here and in Home Assistant." : "Renamed.");
+  } catch (e) { toast(String(e.message || "Could not rename it.")); }
+  EDITING = null; draw();
+}
+async function load() {
+  if (EDITING) return;                       // do not redraw under someone typing
+  try { LIST = await (await fetch("api/devices", { cache: "no-store" })).json(); draw(); } catch (e) {}
 }
 load(); setInterval(load, 5000);
 </script>

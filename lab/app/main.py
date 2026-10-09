@@ -7,6 +7,10 @@
 - Pages: /d/<host>/... is proxied to http://<device>/..., streaming (the page uses Server-Sent Events).
   The device's page loads its script from /0.js; that is rewritten to a relative path, and the LAB.
   page works out its API base from its own URL, so it runs unchanged under the Ingress path.
+- Names: a LAB. device stores the name its owner gives it (text "Sensor name"). The list shows it, can
+  rename it, and copies it to the device's name in Home Assistant (matched by MAC) through the Supervisor
+  API. A name is copied once each time it changes on the sensor, so a later rename in Home Assistant
+  is left alone.
 - Only Home Assistant's Ingress proxy (172.30.32.2) may connect, unless LAB_DEV=1 (local testing).
 """
 import asyncio, gzip, json, os, socket, time
@@ -18,6 +22,9 @@ from zeroconf.asyncio import AsyncServiceBrowser, AsyncServiceInfo, AsyncZerocon
 PORT = int(os.environ.get("LAB_PORT", "8749"))
 DEV = os.environ.get("LAB_DEV") == "1"
 INGRESS_IP = "172.30.32.2"
+SUPERVISOR_TOKEN = os.environ.get("SUPERVISOR_TOKEN")
+DATA = Path("/data") if Path("/data").is_dir() else Path(__file__).parent
+SYNCED = DATA / "names_synced.json"        # mac -> the sensor name last copied to Home Assistant
 TYPES = ["_lab._tcp.local.", "_esphomelib._tcp.local."]
 PRODUCTS = {"zones": "LAB. Zones", "presence": "LAB. Presence"}
 HERE = Path(__file__).parent
@@ -67,6 +74,14 @@ async def discover(app: web.Application) -> None:
     app["browser"] = AsyncServiceBrowser(zc.zeroconf, TYPES, handlers=[handler])
 
 
+async def get_value(s: ClientSession, d: dict, path: str, missing=None):
+    try:
+        async with s.get(f"http://{d['ip']}/{path}") as r:
+            return (await r.json(content_type=None)).get("value") if r.status == 200 else missing
+    except Exception:
+        return missing
+
+
 async def poll(app: web.Application) -> None:
     async with ClientSession(timeout=ClientTimeout(total=4)) as s:
         while True:
@@ -76,12 +91,87 @@ async def poll(app: web.Application) -> None:
                 try:
                     async with s.get(f"http://{d['ip']}/binary_sensor/Presence") as r:
                         d["presence"] = (await r.json(content_type=None)).get("value")
-                    async with s.get(f"http://{d['ip']}/sensor/People") as r:
-                        d["people"] = (await r.json(content_type=None)).get("value") if r.status == 200 else None
                     d["online"], d["seen"] = True, time.time()
                 except Exception:
                     d["online"] = False
+                    continue
+                # Optional: not every LAB. device has these (older firmware drops the connection instead of a 404).
+                d["people"] = await get_value(s, d, "sensor/People")
+                label = await get_value(s, d, "text/Sensor%20name", missing=None)
+                d["can_rename"] = label is not None
+                d["label"] = (label or "").strip()
+            await sync_names()
             await asyncio.sleep(10)
+
+
+# ---- Home Assistant device names ----
+
+def mac_colons(mac: str | None) -> str | None:
+    return ":".join(mac[i:i + 2] for i in range(0, 12, 2)).lower() if mac and len(mac) == 12 else None
+
+
+async def ha_ws(messages: list[dict]) -> list[dict]:
+    """Send messages over Home Assistant's websocket (through the Supervisor) and return the replies."""
+    async with ClientSession() as s, s.ws_connect("http://supervisor/core/websocket", timeout=10) as ws:
+        await ws.receive_json()
+        await ws.send_json({"type": "auth", "access_token": SUPERVISOR_TOKEN})
+        if (await ws.receive_json()).get("type") != "auth_ok":
+            raise RuntimeError("Home Assistant refused the add-on's token")
+        out = []
+        for i, m in enumerate(messages, 1):
+            await ws.send_json({"id": i, **m})
+            while True:
+                r = await ws.receive_json()
+                if r.get("id") == i:
+                    out.append(r); break
+        return out
+
+
+async def sync_names(force: str | None = None) -> None:
+    """Copy each sensor's name to its Home Assistant device, once per change (or now, for `force` host)."""
+    if not SUPERVISOR_TOKEN:
+        return
+    try:
+        synced = json.loads(SYNCED.read_text()) if SYNCED.exists() else {}
+    except Exception:
+        synced = {}
+    todo = {}
+    for d in devices.values():
+        mac = mac_colons(d.get("mac"))
+        if mac and d.get("label") and (synced.get(mac) != d["label"] or d["host"] == force):
+            todo[mac] = d["label"]
+    if not todo:
+        return
+    try:
+        reg = (await ha_ws([{"type": "config/device_registry/list"}]))[0].get("result", [])
+        updates, done = [], []
+        for dev in reg:
+            for kind, value in dev.get("connections", []):
+                if kind == "mac" and value.lower() in todo:
+                    updates.append({"type": "config/device_registry/update", "device_id": dev["id"], "name_by_user": todo[value.lower()]})
+                    done.append(value.lower())
+        if updates:
+            await ha_ws(updates)
+        for mac in done:                 # only remember it once Home Assistant actually has the device
+            synced[mac] = todo[mac]
+        SYNCED.write_text(json.dumps(synced))
+    except Exception as e:
+        print(f"Could not update names in Home Assistant: {e}")
+
+
+async def api_rename(request: web.Request) -> web.Response:
+    data = await request.json()
+    host, name = str(data.get("host", "")), str(data.get("name", "")).strip()[:32]
+    d = devices.get(host)
+    if not d or not d.get("ip"):
+        raise web.HTTPNotFound(text="That device is not on the network right now.")
+    s: ClientSession = request.app["http"]
+    async with s.post(f"http://{d['ip']}/text/Sensor%20name/set", params={"value": name}, data=b"") as r:
+        if r.status != 200:
+            raise web.HTTPBadGateway(text="The device did not accept the name. It may need a firmware update.")
+    d["label"] = name
+    await sync_names(force=host)
+    return web.json_response({"ok": True, "label": name, "home_assistant": bool(SUPERVISOR_TOKEN)})
 
 
 @web.middleware
@@ -103,7 +193,7 @@ async def api_devices(request: web.Request) -> web.Response:
 OLD_BASE = b'const BASE = DEV ? `http://${DEV}` : "";'
 NEW_BASE = b'const BASE = DEV ? `http://${DEV}` : location.pathname.replace(/\\/[^/]*$/, "");'
 
-BACK = ('<a href="../../" style="position:fixed;z-index:30;top:10px;left:50%;transform:translateX(-50%);'
+BACK = ('<a href="../../" style="position:fixed;z-index:30;bottom:16px;left:16px;'
         'font:500 13px system-ui,sans-serif;color:#E0D8CE;background:#333;border-radius:999px;padding:6px 14px;'
         'text-decoration:none;opacity:.92">&larr; All LAB. devices</a>')
 
@@ -165,6 +255,7 @@ def main() -> None:
     app = web.Application(middlewares=[only_ingress])
     app.router.add_get("/", index)
     app.router.add_get("/api/devices", api_devices)
+    app.router.add_post("/api/rename", api_rename)
     app.router.add_get("/d/{host}", lambda r: web.HTTPFound(f"{r.match_info['host']}/"))
     app.router.add_route("*", "/d/{host}/{tail:.*}", proxy)
     app.on_startup.append(start)
