@@ -17,7 +17,7 @@
 """
 import asyncio, gzip, json, os, socket, time
 from pathlib import Path
-from aiohttp import ClientSession, ClientTimeout, web
+from aiohttp import ClientConnectionResetError, ClientSession, ClientTimeout, web
 from zeroconf import ServiceStateChange
 from zeroconf.asyncio import AsyncServiceBrowser, AsyncServiceInfo, AsyncZeroconf
 
@@ -273,9 +273,12 @@ async def proxy(request: web.Request) -> web.StreamResponse:
         if "text/event-stream" in ctype:
             resp.headers["X-Accel-Buffering"] = "no"
         await resp.prepare(request)
-        async for chunk in upstream.content.iter_any():
-            await resp.write(chunk)
-        await resp.write_eof()
+        try:
+            async for chunk in upstream.content.iter_any():
+                await resp.write(chunk)
+            await resp.write_eof()
+        except (ConnectionResetError, ClientConnectionResetError, asyncio.CancelledError):
+            pass                     # the page was closed (normal for the live event stream); drop the device side too
         return resp
 
 

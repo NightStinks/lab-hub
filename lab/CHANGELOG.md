@@ -1,5 +1,8 @@
 # Changelog
 
+## 0.3.1
+- No error in the log when a sensor's page is closed.
+
 ## 0.3.0
 - Sensors stay listed when unplugged or reset (shown as Offline, with Remove), including after the add-on restarts.
 - A factory reset done through LAB. removes the sensor from the list straight away.
